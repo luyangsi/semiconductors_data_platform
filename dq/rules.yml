@@ -1,0 +1,323 @@
+# Data Quality Rules for Semiconductor Manufacturing Data
+# These rules ensure data integrity, traceability, and compliance
+
+rules:
+  # ====== REFERENTIAL INTEGRITY RULES ======
+  - rule_id: DQ001
+    name: Wafer-to-Batch Integrity
+    description: Every wafer must have a valid batch_id that exists in the batch table
+    category: REFERENTIAL_INTEGRITY
+    severity: CRITICAL
+    layer: staging
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM staging_wafer_tests wt
+      LEFT JOIN staging_wafer_batches wb ON wt.batch_id = wb.batch_id
+      WHERE wb.batch_id IS NULL
+    threshold: 0
+    impact: "Breaks traceability chain, blocks curated layer build"
+    
+  - rule_id: DQ002
+    name: Batch-to-Equipment Integrity
+    description: Every batch must reference valid equipment_id
+    category: REFERENTIAL_INTEGRITY
+    severity: CRITICAL
+    layer: staging
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM staging_wafer_batches wb
+      LEFT JOIN staging_equipment e ON wb.equipment_id = e.equipment_id
+      WHERE e.equipment_id IS NULL
+    threshold: 0
+    impact: "Cannot perform equipment-level yield analysis"
+    
+  - rule_id: DQ003
+    name: Process Step Validity
+    description: All process steps must exist in process_step dimension
+    category: REFERENTIAL_INTEGRITY
+    severity: HIGH
+    layer: staging
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM staging_wafer_tests wt
+      LEFT JOIN dim_process_steps ps ON wt.process_step_id = ps.process_step_id
+      WHERE ps.process_step_id IS NULL
+    threshold: 0
+    impact: "Invalid process routing analysis"
+
+  # ====== TEMPORAL CONSISTENCY RULES ======
+  - rule_id: DQ004
+    name: No Time Travel - Equipment Events
+    description: Equipment status timestamps cannot go backward
+    category: TEMPORAL
+    severity: HIGH
+    layer: staging
+    check_sql: |
+      SELECT equipment_id, COUNT(*) as violations
+      FROM (
+        SELECT 
+          equipment_id, 
+          event_timestamp,
+          LAG(event_timestamp) OVER (PARTITION BY equipment_id ORDER BY event_timestamp) as prev_time
+        FROM staging_equipment_events
+      ) sub
+      WHERE event_timestamp < prev_time
+      GROUP BY equipment_id
+    threshold: 0
+    impact: "Data corruption, unreliable equipment history"
+    
+  - rule_id: DQ005
+    name: Process Step Sequence Order
+    description: Process steps must follow fab routing (lithography → etch → implant → test)
+    category: TEMPORAL
+    severity: HIGH
+    layer: staging
+    check_sql: |
+      SELECT batch_id, COUNT(*) as violations
+      FROM (
+        SELECT 
+          batch_id,
+          process_step_number,
+          step_timestamp,
+          LAG(step_timestamp) OVER (PARTITION BY batch_id ORDER BY process_step_number) as prev_step_time
+        FROM staging_wafer_tests
+      ) sub
+      WHERE step_timestamp < prev_step_time
+      GROUP BY batch_id
+    threshold: 0
+    impact: "Invalid process flow, audit compliance failure"
+    
+  - rule_id: DQ006
+    name: Batch Start Before End
+    description: Batch start_time must be before end_time
+    category: TEMPORAL
+    severity: CRITICAL
+    layer: staging
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM staging_wafer_batches
+      WHERE start_time >= end_time
+    threshold: 0
+    impact: "Invalid duration calculations"
+
+  # ====== RANGE & BOUNDS VALIDATION ======
+  - rule_id: DQ007
+    name: Yield Percentage Bounds
+    description: Yield must be between 0% and 100%
+    category: RANGE
+    severity: CRITICAL
+    layer: staging
+    check_sql: |
+      SELECT batch_id, yield_pct
+      FROM staging_batch_summary
+      WHERE yield_pct < 0 OR yield_pct > 100
+    threshold: 0
+    impact: "Invalid business metrics, reporting errors"
+    
+  - rule_id: DQ008
+    name: Defect Density Non-Negative
+    description: Defect density cannot be negative
+    category: RANGE
+    severity: HIGH
+    layer: staging
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM staging_wafer_tests
+      WHERE defect_density < 0
+    threshold: 0
+    impact: "Invalid quality metrics"
+    
+  - rule_id: DQ009
+    name: Equipment Temperature Range
+    description: Equipment temperature must be within realistic operational range (-50°C to 500°C)
+    category: RANGE
+    severity: MEDIUM
+    layer: raw
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM raw_equipment_logs
+      WHERE temperature_c < -50 OR temperature_c > 500
+    threshold: 100  # Allow some sensor noise/errors
+    impact: "Potential sensor malfunction, data quality warning"
+    
+  - rule_id: DQ010
+    name: Pressure Range Validity
+    description: Chamber pressure must be within realistic range (0.001 to 1000 Torr)
+    category: RANGE
+    severity: MEDIUM
+    layer: raw
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM raw_equipment_logs
+      WHERE pressure_torr < 0.001 OR pressure_torr > 1000
+    threshold: 50
+    impact: "Sensor calibration may be needed"
+
+  # ====== COMPLETENESS RULES ======
+  - rule_id: DQ011
+    name: Wafer ID Not Null
+    description: Every test record must have a wafer_id
+    category: COMPLETENESS
+    severity: CRITICAL
+    layer: staging
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM staging_wafer_tests
+      WHERE wafer_id IS NULL OR wafer_id = ''
+    threshold: 0
+    impact: "Cannot perform wafer-level analysis"
+    
+  - rule_id: DQ012
+    name: Equipment ID Not Null
+    description: Equipment logs must have equipment_id
+    category: COMPLETENESS
+    severity: CRITICAL
+    layer: raw
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM raw_equipment_logs
+      WHERE equipment_id IS NULL OR equipment_id = ''
+    threshold: 0
+    impact: "Cannot attribute events to equipment"
+    
+  - rule_id: DQ013
+    name: Test Result Not Null
+    description: Wafer tests must have pass/fail result
+    category: COMPLETENESS
+    severity: HIGH
+    layer: staging
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM staging_wafer_tests
+      WHERE pass_fail IS NULL OR pass_fail NOT IN ('PASS', 'FAIL')
+    threshold: 0
+    impact: "Cannot calculate yield metrics"
+
+  # ====== UNIQUENESS RULES ======
+  - rule_id: DQ014
+    name: Wafer ID Uniqueness
+    description: Wafer IDs must be unique within a batch
+    category: UNIQUENESS
+    severity: CRITICAL
+    layer: staging
+    check_sql: |
+      SELECT batch_id, wafer_id, COUNT(*) as duplicates
+      FROM staging_wafer_tests
+      GROUP BY batch_id, wafer_id
+      HAVING COUNT(*) > 1
+    threshold: 0
+    impact: "Duplicate test results, inflated yield calculations"
+    
+  - rule_id: DQ015
+    name: Batch ID Uniqueness
+    description: Batch IDs must be globally unique
+    category: UNIQUENESS
+    severity: CRITICAL
+    layer: staging
+    check_sql: |
+      SELECT batch_id, COUNT(*) as duplicates
+      FROM staging_wafer_batches
+      GROUP BY batch_id
+      HAVING COUNT(*) > 1
+    threshold: 0
+    impact: "Batch data corruption"
+
+  # ====== MANUFACTURING-SPECIFIC LOGIC ======
+  - rule_id: DQ016
+    name: Wafer Count Per Batch
+    description: Each batch should have between 24-26 wafers (standard for 300mm lots)
+    category: MANUFACTURING
+    severity: MEDIUM
+    layer: staging
+    check_sql: |
+      SELECT batch_id, wafer_count
+      FROM (
+        SELECT batch_id, COUNT(DISTINCT wafer_id) as wafer_count
+        FROM staging_wafer_tests
+        GROUP BY batch_id
+      ) sub
+      WHERE wafer_count < 24 OR wafer_count > 26
+    threshold: 5  # Allow some incomplete batches
+    impact: "Potential incomplete batch processing"
+    
+  - rule_id: DQ017
+    name: Equipment Downtime Reasonableness
+    description: Continuous downtime should not exceed 72 hours without maintenance event
+    category: MANUFACTURING
+    severity: MEDIUM
+    layer: staging
+    check_sql: |
+      SELECT equipment_id, downtime_hours
+      FROM (
+        SELECT 
+          equipment_id,
+          MAX(TIMESTAMPDIFF(HOUR, event_timestamp, 
+                           LEAD(event_timestamp) OVER (PARTITION BY equipment_id ORDER BY event_timestamp))) as downtime_hours
+        FROM staging_equipment_events
+        WHERE status = 'DOWN'
+      ) sub
+      WHERE downtime_hours > 72
+    threshold: 2
+    impact: "Unreported maintenance or data gap"
+    
+  - rule_id: DQ018
+    name: Test Cycle Time Reasonableness
+    description: Test duration should be between 10 seconds and 1 hour
+    category: MANUFACTURING
+    severity: LOW
+    layer: staging
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM staging_wafer_tests
+      WHERE TIMESTAMPDIFF(SECOND, start_time, end_time) < 10 
+         OR TIMESTAMPDIFF(SECOND, start_time, end_time) > 3600
+    threshold: 100
+    impact: "Anomalous test durations - investigate equipment"
+
+  # ====== LATE ARRIVING DATA ======
+  - rule_id: DQ019
+    name: Late Arriving Data Detection
+    description: Records arriving >24 hours after event timestamp
+    category: TIMELINESS
+    severity: WARNING
+    layer: raw
+    check_sql: |
+      SELECT COUNT(*) as violations
+      FROM raw_equipment_logs
+      WHERE ingestion_timestamp > DATE_ADD(event_timestamp, INTERVAL 24 HOUR)
+    threshold: 1000  # Some latency is acceptable
+    impact: "Monitor for systemic pipeline delays"
+    
+  - rule_id: DQ020
+    name: Data Freshness
+    description: Most recent data should be within last 2 hours
+    category: TIMELINESS
+    severity: HIGH
+    layer: raw
+    check_sql: |
+      SELECT TIMESTAMPDIFF(HOUR, MAX(event_timestamp), NOW()) as hours_since_last_data
+      FROM raw_equipment_logs
+    threshold: 2
+    impact: "Potential data pipeline failure"
+
+# ====== RULE EXECUTION CONFIGURATION ======
+execution_config:
+  fail_pipeline_on_critical: true
+  alert_on_high_severity: true
+  generate_report: true
+  store_results: true
+  max_parallel_checks: 5
+  
+# ====== NOTIFICATION SETTINGS ======
+notifications:
+  critical_failures:
+    enabled: true
+    channels:
+      - email
+      - slack
+  high_severity:
+    enabled: true
+    channels:
+      - slack
+  warnings:
+    enabled: false
