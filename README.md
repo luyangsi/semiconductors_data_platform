@@ -1,11 +1,6 @@
 # Semiconductor Manufacturing Data Quality & Yield Analytics Platform
 
 > An end-to-end data engineering & analytics project simulating semiconductor manufacturing operations, focusing on data quality, traceability, and yield-related metrics.
-
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
-[![Data Quality](https://img.shields.io/badge/Data_Quality-Validated-green.svg)]()
-[![Manufacturing Focus](https://img.shields.io/badge/Industry-Semiconductor-orange.svg)]()
-
 ---
 
 ## 📋 Project Motivation
